@@ -1,5 +1,5 @@
 import * as maplibregl from '/vendor/maplibre-gl.mjs';
-import { followCoordinate, predictBusCoordinate, stabilizeRouteTarget } from '/bus-motion.mjs';
+import { advanceDisplayedCoordinate, stabilizeRouteTarget } from '/bus-motion.mjs';
 import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
 
 (function () {
@@ -168,11 +168,11 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
     for (const feature of state.motionGeojson.features) {
       const bus = state.busById.get(feature.properties.id);
       if (!bus) continue;
-      const target = predictBusCoordinate(bus, nowMs);
+      const target = [bus.lon, bus.lat];
       if (bounds && !bounds.contains(feature.geometry.coordinates) && !bounds.contains(target)) continue;
       const motionSpeedKph = Number(bus.motionSpeedKph ?? bus.speed);
       const maximumMetersPerSecond = Math.min(80 / 3.6, Math.max(6, motionSpeedKph / 3.6 * 1.35 + 2));
-      const next = followCoordinate(feature.geometry.coordinates, target, {
+      const next = advanceDisplayedCoordinate(feature.geometry.coordinates, bus, nowMs, {
         maximumStepMeters: maximumMetersPerSecond * MOTION_MS / 1000,
       });
       if (next[0] !== feature.geometry.coordinates[0] || next[1] !== feature.geometry.coordinates[1]) changed = true;
@@ -311,7 +311,8 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
   async function loadRouteStops(bus) {
     const token = ++state.routeLoadToken;
     const routeId = String(bus?.shapeRouteId || '');
-    const direction = bus?.direction === 0 || bus?.direction === 1 ? bus.direction : null;
+    const effectiveDirection = bus?.motionDirection ?? bus?.direction;
+    const direction = effectiveDirection === 0 || effectiveDirection === 1 ? effectiveDirection : null;
     if (!routeId || direction == null) {
       clearRouteStops('此車目前無法判斷路線方向');
       return;

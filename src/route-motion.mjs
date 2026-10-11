@@ -47,6 +47,7 @@ export function buildShapeIndex(rows = []) {
       ? `main:${row.RouteID}:${direction}`
       : `sub:${row.SubRouteID}:${direction}`;
     track.key = key;
+    track.direction = direction;
     index.set(key, track);
   }
   return index;
@@ -134,25 +135,55 @@ function pointAtProgress(track, progress) {
 
 export function createRouteMotionModel(bus, shapeIndex, {
   maximumSnapMeters = 120,
+  maximumCorrectedDirectionSnapMeters = 40,
   previousModel = null,
   positionGain = 0.55,
   velocityGain = 0.12,
 } = {}) {
-  if (!bus || (bus.direction !== 0 && bus.direction !== 1)) return null;
-  const track = shapeIndex.get(`sub:${bus.routeId}:${bus.direction}`) ||
-    shapeIndex.get(`main:${bus.shapeRouteId}:${bus.direction}`);
-  if (!track) return null;
+  if (!bus) return null;
   const reportedAtMs = Date.parse(bus.updatedAt);
-  if (previousModel?.track === track && reportedAtMs <= previousModel.reportedAtMs) return previousModel;
-  const sameTrack = previousModel?.track === track;
-  const elapsedSec = sameTrack && Number.isFinite(reportedAtMs) && Number.isFinite(previousModel.reportedAtMs)
-    ? (reportedAtMs - previousModel.reportedAtMs) / 1000
-    : null;
-  const expectedProgress = elapsedSec > 0
-    ? Math.min(track.length, previousModel.progress + previousModel.speedMps * elapsedSec)
-    : null;
-  const match = nearestProgress(track, bus, { expectedProgress });
-  if (!match || match.distance > maximumSnapMeters) return null;
+  const trackFor = direction => shapeIndex.get(`sub:${bus.routeId}:${direction}`) ||
+    shapeIndex.get(`main:${bus.shapeRouteId}:${direction}`);
+  const probe = track => {
+    if (!track) return null;
+    const sameTrack = previousModel?.track === track;
+    const elapsedSec = sameTrack && Number.isFinite(reportedAtMs) && Number.isFinite(previousModel.reportedAtMs)
+      ? (reportedAtMs - previousModel.reportedAtMs) / 1000
+      : null;
+    const expectedProgress = elapsedSec > 0
+      ? Math.min(track.length, previousModel.progress + previousModel.speedMps * elapsedSec)
+      : null;
+    return {
+      track,
+      sameTrack,
+      elapsedSec,
+      expectedProgress,
+      match: nearestProgress(track, bus, { expectedProgress }),
+    };
+  };
+
+  let selected = null;
+  if (bus.direction === 0 || bus.direction === 1) {
+    const primary = probe(trackFor(bus.direction));
+    if (primary?.match && primary.match.distance <= maximumSnapMeters) selected = primary;
+    if (!selected) {
+      const corrected = probe(trackFor(1 - bus.direction));
+      if (corrected?.match && corrected.match.distance <= maximumCorrectedDirectionSnapMeters) selected = corrected;
+    }
+  } else {
+    const candidates = [probe(trackFor(0)), probe(trackFor(1))]
+      .filter(candidate => candidate?.match && candidate.match.distance <= maximumCorrectedDirectionSnapMeters)
+      .sort((a, b) => a.match.distance - b.match.distance);
+    selected = candidates[0] || null;
+  }
+
+  if (!selected) {
+    const belongsToRoute = previousModel && [trackFor(0), trackFor(1)].includes(previousModel.track);
+    return belongsToRoute ? { ...previousModel, confidence: Math.min(previousModel.confidence, 0.35) } : null;
+  }
+
+  const { track, sameTrack, elapsedSec, expectedProgress, match } = selected;
+  if (sameTrack && reportedAtMs <= previousModel.reportedAtMs) return previousModel;
   let progress = match.progress;
   let speedMps = clamp(Number(bus.speed) || 0, 0, 80) / 3.6;
   let innovationRatio = 0;
@@ -192,7 +223,7 @@ export function createRouteMotionModel(bus, shapeIndex, {
   };
 }
 
-export function predictOnRoute(model, atMs, {
+function predictedProgress(model, atMs, {
   minimumSpeedKph = 3,
   maximumExtrapolationSec = 15,
   maximumDistanceMeters = 250,
@@ -204,18 +235,44 @@ export function predictOnRoute(model, atMs, {
   const distance = model.speedMps * 3.6 < minimumSpeedKph
     ? 0
     : Math.min(model.speedMps * elapsedSec, maximumDistanceMeters);
-  return pointAtProgress(model.track, model.progress + distance);
+  return clamp(model.progress + distance, 0, model.track.length);
+}
+
+export function predictOnRoute(model, atMs, options = {}) {
+  const progress = predictedProgress(model, atMs, options);
+  return progress == null ? null : pointAtProgress(model.track, progress);
+}
+
+function routeMotionPath(model, fromMs, untilMs) {
+  const startProgress = predictedProgress(model, fromMs);
+  const endProgress = predictedProgress(model, untilMs);
+  if (startProgress == null || endProgress == null) return [];
+  const start = pointAtProgress(model.track, startProgress);
+  const end = pointAtProgress(model.track, endProgress);
+  const path = [[start.lon, start.lat]];
+  for (let index = 1; index < model.track.cumulative.length - 1; index += 1) {
+    const progress = model.track.cumulative[index];
+    if (progress > startProgress && progress < endProgress) {
+      path.push([model.track.longitude[index], model.track.latitude[index]]);
+    }
+  }
+  path.push([end.lon, end.lat]);
+  return path;
 }
 
 export function applyRouteMotion(buses, models, atMs) {
   return buses.map(bus => {
     const model = models.get(bus.id);
     const point = predictOnRoute(model, atMs);
+    const motionPathUntilMs = atMs + 2_000;
     return point ? {
       ...bus,
       ...point,
       estimatedAt: new Date(atMs).toISOString(),
       motionMode: 'route',
+      motionDirection: model.track.direction,
+      motionPath: routeMotionPath(model, atMs, motionPathUntilMs),
+      motionPathUntil: new Date(motionPathUntilMs).toISOString(),
       motionSpeedKph: model.speedMps * 3.6,
       motionConfidence: Math.round(model.confidence * 100),
     } : bus;

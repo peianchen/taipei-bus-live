@@ -2,6 +2,36 @@ const EARTH_RADIUS_METERS = 6_371_008.8;
 
 const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
 
+function pathDistanceMeters(first, second) {
+  const latitude = (first[1] + second[1]) / 2 * Math.PI / 180;
+  const x = (second[0] - first[0]) * 111_320 * Math.cos(latitude);
+  const y = (second[1] - first[1]) * 111_320;
+  return Math.hypot(x, y);
+}
+
+function coordinateAlongPath(path, fraction) {
+  const lengths = [];
+  let total = 0;
+  for (let index = 0; index < path.length - 1; index += 1) {
+    const length = pathDistanceMeters(path[index], path[index + 1]);
+    lengths.push(length);
+    total += length;
+  }
+  if (!total) return [...path[0]];
+  let remaining = total * clamp(fraction, 0, 1);
+  for (let index = 0; index < lengths.length; index += 1) {
+    if (remaining <= lengths[index] || index === lengths.length - 1) {
+      const segmentFraction = lengths[index] ? remaining / lengths[index] : 0;
+      return [
+        path[index][0] + (path[index + 1][0] - path[index][0]) * segmentFraction,
+        path[index][1] + (path[index + 1][1] - path[index][1]) * segmentFraction,
+      ];
+    }
+    remaining -= lengths[index];
+  }
+  return [...path.at(-1)];
+}
+
 export function predictBusCoordinate(bus, atMs, {
   minimumSpeedKph = 3,
   maximumSpeedKph = 80,
@@ -10,6 +40,15 @@ export function predictBusCoordinate(bus, atMs, {
 } = {}) {
   const base = [Number(bus.lon), Number(bus.lat)];
   const updatedMs = Date.parse(bus.estimatedAt || bus.updatedAt);
+  const motionPath = Array.isArray(bus.motionPath)
+    ? bus.motionPath.filter(point => Array.isArray(point) && point.length >= 2 && point.slice(0, 2).every(Number.isFinite))
+    : [];
+  const pathUntilMs = Date.parse(bus.motionPathUntil);
+  if (bus.motionMode === 'route' && motionPath.length >= 2 &&
+      Number.isFinite(updatedMs) && Number.isFinite(pathUntilMs) && pathUntilMs > updatedMs) {
+    return coordinateAlongPath(motionPath, (atMs - updatedMs) / (pathUntilMs - updatedMs));
+  }
+  if (bus.motionMode === 'route') return base;
   const speedKph = Number(bus.motionSpeedKph ?? bus.speed);
   const bearingDegrees = Number(bus.bearing);
   if (!base.every(Number.isFinite) || !Number.isFinite(updatedMs) ||
@@ -36,6 +75,13 @@ export function predictBusCoordinate(bus, atMs, {
     Math.cos(angularDistance) - Math.sin(latitude) * Math.sin(targetLatitude),
   );
   return [targetLongitude * 180 / Math.PI, targetLatitude * 180 / Math.PI];
+}
+
+export function advanceDisplayedCoordinate(current, bus, atMs, { maximumStepMeters = Infinity } = {}) {
+  const target = predictBusCoordinate(bus, atMs);
+  return bus?.motionMode === 'route' && Array.isArray(bus.motionPath) && bus.motionPath.length >= 2
+    ? target
+    : followCoordinate(current, target, { maximumStepMeters });
 }
 
 export function followCoordinate(current, target, { maximumStepMeters = Infinity } = {}) {

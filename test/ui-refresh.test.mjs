@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
-import { followCoordinate, predictBusCoordinate, stabilizeRouteTarget } from '../public/bus-motion.mjs';
+import { advanceDisplayedCoordinate, followCoordinate, predictBusCoordinate, stabilizeRouteTarget } from '../public/bus-motion.mjs';
 import { describeBusMotion, formatRelativeAge } from '../public/presentation.mjs';
 
 const APP_URL = new URL('../public/app.js', import.meta.url);
@@ -75,7 +75,8 @@ async function harness(fetches) {
     fetch: url => {
       requests.push(String(url));
       if (String(url).startsWith('/api/routes/')) return response({
-        schemaVersion: 1, routeId: '307', direction: 0,
+        schemaVersion: 1, routeId: '307',
+        direction: Number(new URL(String(url), 'http://localhost').searchParams.get('direction')),
         shape: [[121.53, 25.03], [121.54, 25.04], [121.55, 25.05]],
         stops: [
           { id: 'S1', name: '第一站', sequence: 1, lon: 121.53, lat: 25.03, address: '', bearing: 'E' },
@@ -93,6 +94,7 @@ async function harness(fetches) {
     },
     matchMedia: () => ({ matches: true }),
     predictBusCoordinate,
+    advanceDisplayedCoordinate,
     followCoordinate,
     stabilizeRouteTarget,
     describeBusMotion,
@@ -204,4 +206,14 @@ test('選取車輛才按方向載入路線站牌與官方線形', async () => {
   const features = app.map.getSource('selected-route').data.features;
   assert.equal(features.filter(feature => feature.geometry.type === 'LineString').length, 1);
   assert.equal(features.filter(feature => feature.geometry.type === 'Point').length, 2);
+});
+
+test('官方方向碼校正後，站牌與藍線使用實際匹配方向', async () => {
+  const body = snapshot('2026-09-28T14:00:00.000Z');
+  body.buses[0].motionDirection = 1;
+  const app = await harness([response(body)]);
+  app.map.handlers.get('click:bus-points')({ features: [{ properties: { id: 'BUS-1' } }] });
+  await flush(); await flush();
+  assert.ok(app.requests.includes('/api/routes/307/stops?direction=1'));
+  assert.equal(app.element('routeStopsStatus').textContent, '已顯示 2 站 · 回程');
 });

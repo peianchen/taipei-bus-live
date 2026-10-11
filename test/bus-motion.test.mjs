@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { followCoordinate, predictBusCoordinate, stabilizeRouteTarget } from '../public/bus-motion.mjs';
+import { advanceDisplayedCoordinate, followCoordinate, predictBusCoordinate, stabilizeRouteTarget } from '../public/bus-motion.mjs';
 
 const bus = {
   lon: 121.5,
@@ -54,4 +54,41 @@ test('環狀路線通過終點時允許進度回到起點', () => {
   const previous = { lon: 121.5, lat: 25, routeKey: 'loop:0', routeProgress: 950, routeLength: 1_000 };
   const next = { lon: 121.501, lat: 25, routeKey: 'loop:0', routeProgress: 30, routeLength: 1_000 };
   assert.equal(stabilizeRouteTarget(previous, next), next);
+});
+
+test('路線模式沿短折線通過轉角，不從新舊位置之間切直線', () => {
+  const routeBus = {
+    ...bus,
+    motionMode: 'route',
+    estimatedAt: '2026-09-28T14:00:00.000Z',
+    motionPathUntil: '2026-09-28T14:00:02.000Z',
+    motionPath: [
+      [121.5, 25],
+      [121.5, 25.001],
+      [121.501, 25.001],
+    ],
+  };
+  const atCorner = Date.parse('2026-09-28T14:00:01.050Z');
+  const displayed = advanceDisplayedCoordinate([121.5, 25], routeBus, atCorner, {
+    maximumStepMeters: 5,
+  });
+  assert.ok(Math.abs(displayed[0] - 121.5) < 0.00001);
+  assert.ok(Math.abs(displayed[1] - 25.001) < 0.00005);
+});
+
+test('路線動畫不受上一幀誤差影響，長時間更新不累積漂移', () => {
+  const routeBus = {
+    ...bus,
+    motionMode: 'route',
+    estimatedAt: '2026-09-28T14:00:00.000Z',
+    motionPathUntil: '2026-09-28T14:00:02.000Z',
+    motionPath: [[121.5, 25], [121.5, 25.001], [121.501, 25.001]],
+  };
+  const atCorner = Date.parse('2026-09-28T14:00:01.050Z');
+  let displayed = [121.499, 24.999];
+  for (let frame = 0; frame < 100; frame += 1) {
+    displayed = advanceDisplayedCoordinate(displayed, routeBus, atCorner, { maximumStepMeters: 1 });
+  }
+  const expected = predictBusCoordinate(routeBus, atCorner);
+  assert.deepEqual(displayed, expected);
 });

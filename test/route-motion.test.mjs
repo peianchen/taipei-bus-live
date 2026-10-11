@@ -91,3 +91,47 @@ test('低信心匹配會縮短外插時間', () => {
   const low = predictOnRoute({ ...model, confidence: 0.25 }, at15);
   assert.ok(low.routeProgress < high.routeProgress);
 });
+
+test('同方向明顯不符但反方向很近時採用反方向軌跡', () => {
+  const directions = buildShapeIndex([
+    { RouteID: 30, SubRouteID: -1, GoBack: 0, wkt: 'LINESTRING (121.5 25, 121.501 25)' },
+    { RouteID: 30, SubRouteID: -1, GoBack: 1, wkt: 'LINESTRING (121.5 25.01, 121.501 25.01)' },
+  ]);
+  const corrected = createRouteMotionModel({
+    ...bus, shapeRouteId: '30', direction: 0, lat: 25.01001,
+  }, directions);
+  assert.ok(corrected);
+  assert.equal(corrected.track.direction, 1);
+});
+
+test('方向未知時只選擇距離門檻內的最近軌跡', () => {
+  const directions = buildShapeIndex([
+    { RouteID: 40, SubRouteID: -1, GoBack: 0, wkt: 'LINESTRING (121.5 25, 121.501 25)' },
+    { RouteID: 40, SubRouteID: -1, GoBack: 1, wkt: 'LINESTRING (121.5 25.01, 121.501 25.01)' },
+  ]);
+  const corrected = createRouteMotionModel({
+    ...bus, shapeRouteId: '40', direction: null, lat: 25.01001,
+  }, directions);
+  assert.ok(corrected);
+  assert.equal(corrected.track.direction, 1);
+});
+
+test('單次 GPS 嚴重飄移時保留上一個可信路線模型', () => {
+  const previous = createRouteMotionModel(bus, shapeIndex);
+  const retained = createRouteMotionModel({
+    ...bus,
+    lat: 25.01,
+    updatedAt: '2026-09-28T14:00:10.000Z',
+  }, shapeIndex, { previousModel: previous });
+  assert.ok(retained);
+  assert.equal(retained.track, previous.track);
+  assert.ok(retained.confidence <= 0.35);
+});
+
+test('路線輸出包含供瀏覽器沿線動畫的短折線', () => {
+  const model = createRouteMotionModel(bus, shapeIndex);
+  const [result] = applyRouteMotion([bus], new Map([[bus.id, model]]), Date.parse('2026-09-28T14:00:08.000Z'));
+  assert.ok(result.motionPath.length >= 3);
+  assert.deepEqual(result.motionPath[1], [121.501, 25]);
+  assert.equal(result.motionDirection, 0);
+});
