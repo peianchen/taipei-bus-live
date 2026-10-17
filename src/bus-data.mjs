@@ -4,6 +4,8 @@ export const VEHICLE_URL = 'https://tcgbusfs.blob.core.windows.net/blobbus/GetBu
 export const ROUTE_URL = 'https://tcgbusfs.blob.core.windows.net/blobbus/GetRoute.gz';
 export const SHAPE_URL = 'https://tcgbusfs.blob.core.windows.net/blobbus/GetBusShape.gz';
 export const STOP_URL = 'https://tcgbusfs.blob.core.windows.net/blobbus/GetStop.gz';
+export const PATH_DETAIL_URL = 'https://tcgbusfs.blob.core.windows.net/blobbus/GetPathDetail.gz';
+export const ETA_URL = 'https://tcgbusfs.blob.core.windows.net/blobbus/GetEstimateTime.gz';
 export const DATA_ATTRIBUTION = '臺北市政府交通局公共運輸處「臺北市公車動態資訊」';
 
 const finite = value => {

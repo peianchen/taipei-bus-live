@@ -4,6 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 import { advanceDisplayedCoordinate, followCoordinate, predictBusCoordinate, stabilizeRouteTarget } from '../public/bus-motion.mjs';
 import { describeBusMotion, formatRelativeAge } from '../public/presentation.mjs';
+import { describeArrival } from '../public/arrival.mjs';
 
 const APP_URL = new URL('../public/app.js', import.meta.url);
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -26,14 +27,20 @@ function snapshot(snapshotAt, updatedAt = snapshotAt) {
   };
 }
 
-async function harness(fetches, { zoom = 14, reducedMotion = true } = {}) {
+async function harness(fetches, { zoom = 14, reducedMotion = true, initialUrl = 'https://example.test/' } = {}) {
   const requests = [];
   const elements = new Map();
+  const storage = new Map();
+  const windowListeners = new Map();
+  let currentUrl = new URL(initialUrl);
   const element = id => {
     if (!elements.has(id)) elements.set(id, {
       id, dataset: {}, disabled: false, hidden: id === 'busSheet' || id === 'filterStatus',
-      style: {}, textContent: '', value: '', listeners: new Map(),
+      style: {}, textContent: '', value: '', listeners: new Map(), children: [], attributes: {},
       addEventListener(name, listener) { this.listeners.set(name, listener); },
+      setAttribute(name, value) { this.attributes[name] = value; },
+      appendChild(child) { this.children.push(child); },
+      replaceChildren(...children) { this.children = children; },
       focus() {},
     });
     return elements.get(id);
@@ -73,10 +80,15 @@ async function harness(fetches, { zoom = 14, reducedMotion = true } = {}) {
     document: {
       hidden: false,
       getElementById: element,
+      createElement: () => element(Symbol()),
       addEventListener() {},
     },
     fetch: url => {
       requests.push(String(url));
+      if (String(url).endsWith('/eta')) return response({
+        schemaVersion: 1, routeId: '307', snapshotAt: '2026-09-28T14:00:00.000Z',
+        checkedAt: '2026-09-28T14:00:00.000Z', estimates: [{ stopId: 'S1', seconds: 180 }],
+      });
       if (String(url).startsWith('/api/routes/')) return response({
         schemaVersion: 1, routeId: '307',
         direction: Number(new URL(String(url), 'http://localhost').searchParams.get('direction')),
@@ -94,7 +106,16 @@ async function harness(fetches, { zoom = 14, reducedMotion = true } = {}) {
       Map: class { constructor() { return fakeMap; } },
       NavigationControl: class {},
       LngLatBounds: class { extend() { return this; } },
+      Popup: class { setLngLat() { return this; } setText() { return this; } addTo() { return this; } },
     },
+    window: {
+      get location() { return currentUrl; },
+      history: { replaceState(_state, _title, url) { currentUrl = new URL(url); } },
+      addEventListener(name, listener) { windowListeners.set(name, listener); },
+    },
+    localStorage: { getItem(key) { return storage.get(key) || null; }, setItem(key, value) { storage.set(key, value); } },
+    navigator: { clipboard: { async writeText(value) { storage.set('clipboard', value); } } },
+    URL, URLSearchParams,
     matchMedia: () => ({ matches: reducedMotion }),
     predictBusCoordinate,
     advanceDisplayedCoordinate,
@@ -102,6 +123,7 @@ async function harness(fetches, { zoom = 14, reducedMotion = true } = {}) {
     stabilizeRouteTarget,
     describeBusMotion,
     formatRelativeAge,
+    describeArrival,
     setInterval(callback, milliseconds) { intervals.set(milliseconds, callback); return intervals.size; },
     clearTimeout() {},
     setTimeout(callback) { callback(); return 1; },
@@ -112,7 +134,8 @@ async function harness(fetches, { zoom = 14, reducedMotion = true } = {}) {
   fakeMap.handlers.get('load')();
   await flush(); await flush();
   return {
-    element, map: fakeMap, requests,
+    element, map: fakeMap, requests, storage,
+    get url() { return currentUrl; },
     tick: () => intervals.get(1_000)(),
     animateTick: () => intervals.get(250)(),
   };
@@ -213,6 +236,46 @@ test('選取車輛才按方向載入路線站牌與官方線形', async () => {
   const features = app.map.getSource('selected-route').data.features;
   assert.equal(features.filter(feature => feature.geometry.type === 'LineString').length, 1);
   assert.equal(features.filter(feature => feature.geometry.type === 'Point').length, 2);
+});
+
+test('站牌選擇可顯示官方 ETA，並標示官方資料時間', async () => {
+  const app = await harness([response(snapshot('2026-09-28T14:00:00.000Z'))]);
+  app.map.handlers.get('click:bus-points')({ features: [{ properties: { id: 'BUS-1' } }] });
+  await flush(); await flush();
+  assert.ok(app.requests.includes('/api/routes/307/eta'));
+  app.element('stopSelect').value = 'S1';
+  app.element('stopSelect').listeners.get('change')();
+  assert.equal(app.element('stopEta').textContent, '約 3 分鐘');
+  assert.match(app.element('etaUpdated').textContent, /官方預估更新/);
+});
+
+test('可收藏路線並用常用路線按鈕搜尋', async () => {
+  const app = await harness([response(snapshot('2026-09-28T14:00:00.000Z'))]);
+  app.map.handlers.get('click:bus-points')({ features: [{ properties: { id: 'BUS-1' } }] });
+  app.element('favoriteButton').listeners.get('click')();
+  assert.equal(app.element('favoriteButton').attributes['aria-pressed'], 'true');
+  assert.equal(app.element('favorites').hidden, false);
+  assert.deepEqual(JSON.parse(app.storage.get('taipei-bus-live:favorites:v1')), ['307']);
+  app.element('favoriteRoutes').children[0].listeners.get('click')();
+  assert.equal(app.element('searchInput').value, '307');
+  assert.equal(app.url.searchParams.get('q'), '307');
+});
+
+test('分享路線複製可重新開啟的路線搜尋連結', async () => {
+  const app = await harness([response(snapshot('2026-09-28T14:00:00.000Z'))]);
+  app.map.handlers.get('click:bus-points')({ features: [{ properties: { id: 'BUS-1' } }] });
+  await app.element('shareButton').listeners.get('click')();
+  assert.equal(new URL(app.storage.get('clipboard')).searchParams.get('q'), '307');
+  assert.match(app.element('shareStatus').textContent, /已複製/);
+});
+
+test('分享連結重新開啟時還原路線搜尋', async () => {
+  const app = await harness([response(snapshot('2026-09-28T14:00:00.000Z'))], {
+    initialUrl: 'https://example.test/?q=307',
+  });
+  assert.equal(app.element('searchInput').value, '307');
+  assert.match(app.element('filterText').textContent, /307/);
+  assert.equal(app.map.getSource('buses').data.features.length, 1);
 });
 
 test('官方方向碼校正後，站牌與藍線使用實際匹配方向', async () => {

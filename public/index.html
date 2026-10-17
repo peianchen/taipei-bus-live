@@ -47,6 +47,10 @@
         <span id="filterText"></span>
         <button id="clearSearchButton" type="button">清除</button>
       </div>
+      <div class="favorites" id="favorites" hidden>
+        <span>常用路線</span>
+        <div id="favoriteRoutes" class="favorite-routes"></div>
+      </div>
     </header>
 
     <div class="map-actions">
@@ -68,6 +72,11 @@
         <h2 id="busTitle">公車資訊</h2>
         <p id="busDestination">方向資料未提供</p>
       </div>
+      <div class="route-actions">
+        <button id="favoriteButton" type="button" aria-pressed="false">☆ 收藏路線</button>
+        <button id="shareButton" type="button">分享路線</button>
+      </div>
+      <p class="action-status" id="shareStatus" role="status" aria-live="polite"></p>
       <dl class="bus-facts">
         <div><dt>車牌</dt><dd id="busPlate">—</dd></div>
         <div><dt>官方速度</dt><dd id="busSpeed">—</dd></div>
@@ -82,6 +91,12 @@
           <span id="routeStopsStatus">選取公車後載入該方向站牌</span>
         </div>
         <button id="fitRouteButton" type="button" hidden>顯示全線</button>
+      </div>
+      <div class="arrival-panel">
+        <label for="stopSelect">站牌到站預估</label>
+        <select id="stopSelect" disabled><option value="">先選取公車並載入站牌</option></select>
+        <div id="stopEta" class="arrival-value" role="status" aria-live="polite">選擇站牌查看官方預估</div>
+        <small id="etaUpdated">官方資料每 15 秒檢查一次；預估與車輛定位可能不同步</small>
       </div>
       <p class="source-note">移動位置會優先沿官方路線做短時間平滑推估；這是估算位置，實際乘車請以官方回報、站牌與業者資訊為準。</p>
     </section>

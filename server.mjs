@@ -2,10 +2,11 @@ import { createServer } from 'node:http';
 import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeBusSnapshot, readGzipJson, ROUTE_URL, SHAPE_URL, STOP_URL, VEHICLE_URL } from './src/bus-data.mjs';
+import { normalizeBusSnapshot, readGzipJson, ROUTE_URL, SHAPE_URL, STOP_URL, PATH_DETAIL_URL, ETA_URL, VEHICLE_URL } from './src/bus-data.mjs';
+import { buildEstimateSnapshot, estimatesForRoute } from './src/estimate-time.mjs';
 import { prepareJson, prepareStaleSnapshot, selectJsonPayload } from './src/json-response.mjs';
 import { applyRouteMotion, buildShapeIndex, createRouteMotionModel, routeTrackCoordinates } from './src/route-motion.mjs';
-import { buildRouteStopIndex, routeStops } from './src/route-stops.mjs';
+import { buildPathDetailIndex, buildRouteStopIndex, routeStops } from './src/route-stops.mjs';
 import { isVendorFile, resolveStaticFile } from './src/static-files.mjs';
 import { fetchUpstream } from './src/upstream.mjs';
 
@@ -14,6 +15,7 @@ const PORT = Number(process.env.PORT || 5180);
 const HOST = process.env.HOST || '127.0.0.1';
 const CACHE_MS = 1_000;
 const ROUTE_CACHE_MS = 6 * 60 * 60 * 1000;
+const ETA_CACHE_MS = 15_000;
 let cache = null;
 let inflight = null;
 let routeCache = null;
@@ -22,6 +24,10 @@ let shapeCache = null;
 let shapeInflight = null;
 let stopCache = null;
 let stopInflight = null;
+let pathCache = null;
+let pathInflight = null;
+let estimateCache = null;
+let estimateInflight = null;
 let motionModels = new Map();
 let modeledSnapshotAt = null;
 
@@ -67,6 +73,39 @@ async function currentStopIndex() {
     return data;
   })().finally(() => { stopInflight = null; });
   return stopInflight;
+}
+
+async function currentPathIndex() {
+  if (pathCache && Date.now() - pathCache.cachedAt < ROUTE_CACHE_MS) return pathCache.data;
+  if (pathInflight) return pathInflight;
+  pathInflight = (async () => {
+    const response = await fetchUpstream(PATH_DETAIL_URL);
+    const body = await readGzipJson(response);
+    const data = buildPathDetailIndex(body?.BusInfo);
+    pathCache = { cachedAt: Date.now(), data };
+    return data;
+  })().finally(() => { pathInflight = null; });
+  return pathInflight;
+}
+
+async function currentEstimates() {
+  if (estimateCache && Date.now() < estimateCache.nextCheckAt) return estimateCache;
+  if (estimateInflight) return estimateInflight;
+  estimateInflight = (async () => {
+    try {
+      const response = await fetchUpstream(ETA_URL);
+      const body = await readGzipJson(response);
+      const cachedAt = Date.now();
+      estimateCache = { cachedAt, nextCheckAt: cachedAt + ETA_CACHE_MS, stale: false, data: buildEstimateSnapshot(body, cachedAt) };
+      return estimateCache;
+    } catch (error) {
+      if (!estimateCache) throw error;
+      console.warn('到站預估暫時無法更新，保留上一份資料：', error.message);
+      estimateCache = { ...estimateCache, nextCheckAt: Date.now() + ETA_CACHE_MS, stale: true };
+      return estimateCache;
+    }
+  })().finally(() => { estimateInflight = null; });
+  return estimateInflight;
 }
 
 async function currentBuses() {
@@ -151,6 +190,7 @@ async function staticFile(pathname, response) {
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   const routeStopsMatch = /^\/api\/routes\/(\d+)\/stops$/.exec(url.pathname);
+  const routeEtaMatch = /^\/api\/routes\/(\d+)\/eta$/.exec(url.pathname);
   try {
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       response.writeHead(405, { allow: 'GET, HEAD' }); response.end(); return;
@@ -158,6 +198,18 @@ const server = createServer(async (request, response) => {
     if (url.pathname === '/api/buses') {
       const current = await currentBuses();
       sendPreparedJson(response, current.prepared, 200, request.headers['accept-encoding']);
+      return;
+    }
+    if (routeEtaMatch) {
+      const { data, cachedAt, stale } = await currentEstimates();
+      sendJson(response, {
+        schemaVersion: 1,
+        routeId: routeEtaMatch[1],
+        snapshotAt: data.snapshotAt,
+        checkedAt: new Date().toISOString(),
+        upstreamStale: stale || Date.now() - cachedAt > ETA_CACHE_MS * 2,
+        estimates: estimatesForRoute(data, routeEtaMatch[1]),
+      }, 200, request.headers['accept-encoding']);
       return;
     }
     if (routeStopsMatch) {
@@ -173,10 +225,16 @@ const server = createServer(async (request, response) => {
         sendJson(response, { error: 'subRouteId 必須是數字。' }, 400, request.headers['accept-encoding']);
         return;
       }
-      const [stopIndex, shapeIndex] = await Promise.all([currentStopIndex(), currentShapeIndex()]);
+      const [stopIndex, shapeIndex, pathIndex] = await Promise.all([
+        currentStopIndex(), currentShapeIndex(),
+        subRouteId == null ? Promise.resolve(null) : currentPathIndex().catch(error => {
+          console.warn('支線站序暫時無法取得，改用線形篩選：', error.message);
+          return pathCache?.data || null;
+        }),
+      ]);
       const shape = routeTrackCoordinates(shapeIndex, routeId, direction, subRouteId);
       const mainShape = subRouteId == null ? [] : routeTrackCoordinates(shapeIndex, routeId, direction);
-      const stops = routeStops(stopIndex, routeId, direction, { subRouteId, shape, mainShape });
+      const stops = routeStops(stopIndex, routeId, direction, { subRouteId, shape, mainShape, pathIndex });
       sendJson(response, {
         schemaVersion: 1,
         routeId,

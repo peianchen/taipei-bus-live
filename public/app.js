@@ -1,6 +1,7 @@
 import * as maplibregl from '/vendor/maplibre-gl.mjs';
 import { advanceDisplayedCoordinate, stabilizeRouteTarget } from '/bus-motion.mjs';
 import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
+import { describeArrival } from '/arrival.mjs';
 
 (function () {
   'use strict';
@@ -10,10 +11,14 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
   const REFRESH_MS = 1_000;
   const MOTION_MS = 250;
   const ROUTE_CACHE_LIMIT = 24;
+  const FAVORITES_KEY = 'taipei-bus-live:favorites:v1';
+  const FAVORITES_LIMIT = 12;
   const state = {
     buses: [], busById: new Map(), motionGeojson: EMPTY, query: '', refreshTimer: null,
     motionTimer: null, loading: false, selected: null, snapshotAt: null, checkedAt: null,
     routeGeojson: EMPTY, routeCache: new Map(), routeLoadToken: 0, selectedRouteKey: '',
+    routeStops: [], estimates: new Map(), etaSnapshotAt: null, etaCheckedAt: null,
+    etaStale: false, etaLoadToken: 0, etaLoading: false, favorites: [],
   };
 
   const elements = {
@@ -29,7 +34,46 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
     routeStopsPanel: document.getElementById('routeStopsPanel'),
     routeStopsStatus: document.getElementById('routeStopsStatus'),
     fitRoute: document.getElementById('fitRouteButton'),
+    favorites: document.getElementById('favorites'), favoriteRoutes: document.getElementById('favoriteRoutes'),
+    favoriteButton: document.getElementById('favoriteButton'), shareButton: document.getElementById('shareButton'),
+    shareStatus: document.getElementById('shareStatus'), stopSelect: document.getElementById('stopSelect'),
+    stopEta: document.getElementById('stopEta'), etaUpdated: document.getElementById('etaUpdated'),
   };
+
+  function loadFavorites() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(FAVORITES_KEY) || '[]');
+      return Array.isArray(saved) ? [...new Set(saved.filter(item => typeof item === 'string' && item.length <= 40))].slice(0, FAVORITES_LIMIT) : [];
+    } catch { return []; }
+  }
+
+  state.favorites = loadFavorites();
+
+  function saveFavorites() {
+    try { localStorage.setItem(FAVORITES_KEY, JSON.stringify(state.favorites)); } catch { /* Private mode can disallow storage. */ }
+  }
+
+  function renderFavorites() {
+    elements.favoriteRoutes.replaceChildren();
+    elements.favorites.hidden = state.favorites.length === 0;
+    for (const route of state.favorites) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = route;
+      button.setAttribute('aria-label', `搜尋 ${route} 路線`);
+      button.addEventListener('click', () => {
+        if (!elements.sheet.hidden) closeSheet();
+        setQuery(route, { fit: true });
+      });
+      elements.favoriteRoutes.appendChild(button);
+    }
+  }
+
+  function updateFavoriteButton(route) {
+    const favorite = state.favorites.includes(route);
+    elements.favoriteButton.setAttribute('aria-pressed', String(favorite));
+    elements.favoriteButton.textContent = favorite ? '★ 已收藏路線' : '☆ 收藏路線';
+  }
 
   const map = new maplibregl.Map({
     container: 'map',
@@ -131,6 +175,18 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
     const query = normalized(state.query);
     if (!query) return state.buses;
     return state.buses.filter(bus => normalized(bus.route).includes(query) || normalized(bus.plate).includes(query));
+  }
+
+  function setQuery(query, { fit = false, updateUrl = true } = {}) {
+    state.query = String(query || '').trim();
+    elements.search.value = state.query;
+    if (updateUrl) {
+      const url = new URL(window.location.href);
+      if (state.query) url.searchParams.set('q', state.query);
+      else url.searchParams.delete('q');
+      window.history.replaceState(null, '', url);
+    }
+    applyFilter({ fit });
   }
 
   function applyFilter({ fit = false, preservePositions = false } = {}) {
@@ -276,6 +332,7 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
     elements.motionStatus.textContent = motion.label;
     elements.motionStatus.dataset.tone = motion.tone;
     elements.motionDetail.textContent = motion.detail;
+    updateFavoriteButton(bus.route);
   }
 
   function updateSelectedLayer() {
@@ -293,11 +350,11 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
       geometry: { type: 'LineString', coordinates: shape },
       properties: { kind: 'route' },
     });
-    for (const stop of stops) features.push({
+    for (const [index, stop] of stops.entries()) features.push({
       type: 'Feature', id: `stop-${stop.id}`,
       geometry: { type: 'Point', coordinates: [stop.lon, stop.lat] },
       properties: {
-        kind: 'stop', id: stop.id, name: stop.name, sequence: stop.sequence,
+        kind: 'stop', id: stop.id, name: stop.name, sequence: index + 1,
         bearing: stop.bearing || '', address: stop.address || '',
       },
     });
@@ -306,19 +363,85 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
 
   function clearRouteStops(message = '選取公車後載入該方向站牌') {
     state.routeLoadToken += 1;
+    state.etaLoadToken += 1;
+    state.etaLoading = false;
+    state.routeStops = [];
+    state.estimates = new Map();
+    state.etaSnapshotAt = null;
     state.routeGeojson = EMPTY;
     map.getSource('selected-route')?.setData(EMPTY);
     elements.routeStopsPanel.setAttribute?.('aria-busy', 'false');
     elements.routeStopsStatus.textContent = message;
     elements.fitRoute.hidden = true;
+    elements.stopSelect.replaceChildren();
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = '先選取公車並載入站牌';
+    elements.stopSelect.appendChild(option);
+    elements.stopSelect.disabled = true;
+    elements.stopEta.textContent = '選擇站牌查看官方預估';
+    elements.etaUpdated.textContent = '官方資料每 15 秒檢查一次；預估與車輛定位可能不同步';
+  }
+
+  function stopEtaText(stopId) {
+    if (!state.etaSnapshotAt) return '到站資料尚未載入';
+    return describeArrival(state.estimates.get(String(stopId)));
+  }
+
+  function renderSelectedEta() {
+    const stopId = elements.stopSelect.value;
+    elements.stopEta.textContent = stopId ? stopEtaText(stopId) : '選擇站牌查看官方預估';
+    if (!state.etaSnapshotAt) return;
+    const ageSec = Math.max(0, Math.floor((Date.parse(state.etaCheckedAt) - Date.parse(state.etaSnapshotAt)) / 1000));
+    const delayed = state.etaStale || ageSec > 90;
+    elements.etaUpdated.textContent = `官方預估更新 ${timeText(state.etaSnapshotAt)}${delayed ? ' · 資料可能延遲' : ''}；每 15 秒檢查`;
+  }
+
+  async function loadEta(routeId) {
+    if (state.etaLoading || !state.selected || !state.routeStops.length) return;
+    const token = ++state.etaLoadToken;
+    state.etaLoading = true;
+    try {
+      const response = await fetch(`/api/routes/${encodeURIComponent(routeId)}/eta`, { cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const body = await response.json();
+      if (body.schemaVersion !== 1 || !Array.isArray(body.estimates)) throw new Error('資料格式錯誤');
+      if (token !== state.etaLoadToken || !state.selected) return;
+      state.estimates = new Map(body.estimates.map(item => [String(item.stopId), item.seconds]));
+      state.etaSnapshotAt = body.snapshotAt;
+      state.etaCheckedAt = body.checkedAt;
+      state.etaStale = body.upstreamStale === true;
+      renderSelectedEta();
+    } catch {
+      if (token === state.etaLoadToken) {
+        elements.etaUpdated.textContent = '到站資料暫時無法更新，稍後自動重試';
+      }
+    } finally {
+      if (token === state.etaLoadToken) state.etaLoading = false;
+    }
   }
 
   function showRouteStops(body) {
+    state.routeStops = body.stops;
     state.routeGeojson = routeGeojson(body);
     map.getSource('selected-route')?.setData(state.routeGeojson);
     elements.routeStopsPanel.setAttribute?.('aria-busy', 'false');
     elements.routeStopsStatus.textContent = `已顯示 ${body.stops.length} 站 · ${body.direction === 0 ? '去程' : '回程'}`;
     elements.fitRoute.hidden = body.stops.length === 0;
+    elements.stopSelect.replaceChildren();
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = '選擇站牌';
+    elements.stopSelect.appendChild(placeholder);
+    for (const [index, stop] of body.stops.entries()) {
+      const option = document.createElement('option');
+      option.value = String(stop.id);
+      option.textContent = `${index + 1}. ${stop.name}`;
+      elements.stopSelect.appendChild(option);
+    }
+    elements.stopSelect.disabled = body.stops.length === 0;
+    elements.stopEta.textContent = '選擇站牌查看官方預估';
+    if (body.stops.length) loadEta(body.routeId);
   }
 
   function routeSelectionKey(bus) {
@@ -341,10 +464,17 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
     }
     const key = `${routeId}:${direction}:${subRouteId || ''}`;
     state.routeGeojson = EMPTY;
+    state.routeStops = [];
+    state.estimates = new Map();
+    state.etaSnapshotAt = null;
+    state.etaLoadToken += 1;
+    state.etaLoading = false;
     map.getSource('selected-route')?.setData(EMPTY);
     elements.routeStopsPanel.setAttribute?.('aria-busy', 'true');
     elements.routeStopsStatus.textContent = '正在載入該方向站牌…';
     elements.fitRoute.hidden = true;
+    elements.stopSelect.disabled = true;
+    elements.stopEta.textContent = '正在載入站牌…';
     try {
       let body = state.routeCache.get(key);
       if (!body) {
@@ -369,6 +499,7 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
     state.selectedRouteKey = routeSelectionKey(bus);
     updateSelectedLayer();
     renderBus(bus);
+    elements.shareStatus.textContent = '';
     const wasHidden = elements.sheet.hidden;
     elements.sheet.hidden = false;
     elements.app.dataset.sheetOpen = 'true';
@@ -414,11 +545,14 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
   });
   map.on('click', 'route-stops', event => {
     const feature = event.features?.[0]; if (!feature) return;
+    elements.stopSelect.value = String(feature.properties.id);
+    renderSelectedEta();
     const sequence = feature.properties.sequence ? `${feature.properties.sequence}. ` : '';
     const address = feature.properties.address ? `\n${feature.properties.address}` : '';
+    const eta = `\n官方預估：${stopEtaText(feature.properties.id)}`;
     new maplibregl.Popup({ closeButton: false, offset: 12 })
       .setLngLat(feature.geometry.coordinates)
-      .setText(`${sequence}${feature.properties.name}${address}`)
+      .setText(`${sequence}${feature.properties.name}${address}${eta}`)
       .addTo(map);
   });
   for (const layer of ['bus-clusters', 'bus-points', 'route-stops']) {
@@ -429,13 +563,38 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
   let searchTimer;
   elements.search.addEventListener('input', () => {
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => { state.query = elements.search.value; applyFilter({ fit: true }); }, 180);
+    searchTimer = setTimeout(() => setQuery(elements.search.value, { fit: true }), 180);
   });
   elements.clearSearch.addEventListener('click', () => {
-    elements.search.value = '';
-    state.query = '';
-    applyFilter();
+    setQuery('');
     elements.search.focus();
+  });
+  elements.favoriteButton.addEventListener('click', () => {
+    const route = state.busById.get(state.selected)?.route;
+    if (!route) return;
+    if (state.favorites.includes(route)) state.favorites = state.favorites.filter(item => item !== route);
+    else state.favorites = [route, ...state.favorites].slice(0, FAVORITES_LIMIT);
+    saveFavorites();
+    renderFavorites();
+    updateFavoriteButton(route);
+  });
+  elements.shareButton.addEventListener('click', async () => {
+    const route = state.busById.get(state.selected)?.route;
+    if (!route) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set('q', route);
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      elements.shareStatus.textContent = '路線連結已複製；開啟後會搜尋該路線';
+    } catch {
+      elements.shareStatus.textContent = '無法自動複製，請從瀏覽器網址列複製連結';
+      window.history.replaceState(null, '', url);
+    }
+  });
+  elements.stopSelect.addEventListener('change', () => {
+    renderSelectedEta();
+    const stop = state.routeStops.find(item => String(item.id) === elements.stopSelect.value);
+    if (stop) map.easeTo({ center: [stop.lon, stop.lat], zoom: Math.max(14, map.getZoom()), duration: prefersReducedMotion() ? 0 : 400 });
   });
   elements.refresh.addEventListener('click', () => {
     elements.refresh.setAttribute?.('aria-busy', 'true');
@@ -462,7 +621,16 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
     }, { enableHighAccuracy: false, timeout: 8000, maximumAge: 60000 });
   });
 
+  const initialQuery = new URLSearchParams(window.location.search).get('q') || '';
+  setQuery(initialQuery, { updateUrl: false });
+  renderFavorites();
+  window.addEventListener('popstate', () => setQuery(new URLSearchParams(window.location.search).get('q') || '', { updateUrl: false }));
   state.refreshTimer = setInterval(() => { if (!document.hidden) refresh(); }, REFRESH_MS);
   state.motionTimer = setInterval(animateVehicles, MOTION_MS);
+  setInterval(() => {
+    if (document.hidden || !state.selected || !state.routeStops.length) return;
+    const routeId = state.busById.get(state.selected)?.shapeRouteId;
+    if (routeId) loadEta(routeId);
+  }, 15_000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 })();

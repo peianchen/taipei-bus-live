@@ -50,9 +50,32 @@ export function buildRouteStopIndex(rows = []) {
   return index;
 }
 
-export function routeStops(index, routeId, direction, { subRouteId = null, shape = [], mainShape = [] } = {}) {
+export function buildPathDetailIndex(rows = []) {
+  const index = new Map();
+  for (const row of rows) {
+    const pathId = String(row?.pathAttributeId ?? '').trim();
+    const stopId = String(row?.stopId ?? '').trim();
+    const sequence = finite(row?.sequenceNo);
+    if (!pathId || !stopId || sequence == null || String(row?.type ?? '0') !== '0') continue;
+    if (!index.has(pathId)) index.set(pathId, new Map());
+    const stops = index.get(pathId);
+    if (!stops.has(stopId) || sequence < stops.get(stopId)) stops.set(stopId, sequence);
+  }
+  return index;
+}
+
+export function routeStops(index, routeId, direction, { subRouteId = null, shape = [], mainShape = [], pathIndex = null } = {}) {
   const stops = index.get(keyFor(String(routeId), Number(direction))) || [];
-  if (subRouteId == null || shape.length < 2) return stops;
+  if (subRouteId == null) return stops;
+  const officialPath = pathIndex?.get(String(subRouteId));
+  if (officialPath) {
+    // GetPathDetail provides exact branch membership and order. It avoids
+    // accidentally including a nearby stop belonging to another branch.
+    const exactStops = stops.filter(stop => officialPath.has(stop.id))
+      .sort((a, b) => officialPath.get(a.id) - officialPath.get(b.id) || a.id.localeCompare(b.id));
+    if (exactStops.length) return exactStops;
+  }
+  if (shape.length < 2) return stops;
   if (mainShape.length === shape.length && mainShape.every((point, index) =>
     point[0] === shape[index][0] && point[1] === shape[index][1])) return stops;
   // GetStop groups stops by the parent route, not by SubRouteID. Keep only

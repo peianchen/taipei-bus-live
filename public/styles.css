@@ -20,7 +20,7 @@
 
 * { box-sizing: border-box; }
 html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; overscroll-behavior: none; background: var(--background); }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button { touch-action: manipulation; }
 .app-shell, #map { width: 100%; height: 100%; min-height: 100dvh; }
 .app-shell { position: relative; isolation: isolate; }
@@ -77,9 +77,14 @@ button { touch-action: manipulation; }
 .summary-row strong { display: block; overflow: hidden; color: var(--text); font-size: 17px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; }
 .summary-row span { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; }
 .filter-status { display: flex; min-height: 40px; margin: 10px 0 0; padding: 6px 6px 6px 12px; align-items: center; justify-content: space-between; gap: 8px; border-radius: 10px; color: var(--primary-strong); background: #eff6ff; font-size: 13px; font-weight: 650; }
+.filter-status[hidden] { display: none; }
 .filter-status[data-empty="true"] { color: var(--warning); background: #fff7ed; }
 .filter-status button { min-width: 52px; min-height: 32px; padding: 4px 10px; border: 0; border-radius: 8px; color: var(--primary-strong); background: transparent; cursor: pointer; font-weight: 700; }
 .filter-status button:focus-visible { outline: 3px solid color-mix(in srgb, var(--focus) 55%, transparent); outline-offset: 1px; }
+.favorites { margin-top: 12px; color: var(--muted); font-size: 12px; }
+.favorite-routes { display: flex; gap: 6px; margin-top: 6px; overflow-x: auto; }
+.favorite-routes button { flex: 0 0 auto; min-height: 44px; padding: 8px 12px; border: 1px solid #bfdbfe; border-radius: 999px; color: var(--primary-strong); background: #eff6ff; cursor: pointer; font-size: 13px; font-weight: 700; }
+.favorite-routes button:focus-visible, .route-actions button:focus-visible, .arrival-panel select:focus-visible { outline: 3px solid color-mix(in srgb, var(--focus) 55%, transparent); outline-offset: 2px; }
 
 .map-actions { position: absolute; z-index: 15; right: 16px; bottom: max(164px, calc(env(safe-area-inset-bottom) + 148px)); transition: opacity 160ms ease; }
 .map-action { background: rgba(255,255,255,.96); }
@@ -101,6 +106,10 @@ button { touch-action: manipulation; }
 .sheet-copy { padding-right: 44px; }
 .sheet-copy h2 { margin: 12px 0 0; color: var(--text); font-size: 18px; }
 .sheet-copy p { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+.route-actions { display: flex; gap: 8px; margin-top: 12px; }
+.route-actions button { min-height: 44px; padding: 8px 12px; border: 1px solid #bfdbfe; border-radius: 10px; color: var(--primary-strong); background: #eff6ff; cursor: pointer; font-size: 13px; font-weight: 750; }
+.route-actions button[aria-pressed="true"] { border-color: #facc15; color: #854d0e; background: #fef9c3; }
+.action-status:not(:empty) { margin: 7px 0 0; color: var(--success); font-size: 12px; }
 .bus-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin: 16px 0 0; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--border); }
 .bus-facts div { min-width: 0; padding: 10px 12px; background: var(--surface); }
 .bus-facts .wide { grid-column: 1 / -1; }
@@ -115,6 +124,12 @@ button { touch-action: manipulation; }
 .route-stops-panel button { flex: 0 0 auto; min-width: 88px; min-height: 44px; padding: 8px 12px; border: 1px solid #bfdbfe; border-radius: 10px; color: var(--primary-strong); background: #eff6ff; cursor: pointer; font-size: 13px; font-weight: 750; }
 .route-stops-panel button:active { background: #dbeafe; }
 .route-stops-panel button:focus-visible { outline: 3px solid color-mix(in srgb, var(--focus) 55%, transparent); outline-offset: 2px; }
+.arrival-panel { display: grid; gap: 7px; margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.arrival-panel label { color: var(--text); font-size: 13px; font-weight: 750; }
+.arrival-panel select { width: 100%; min-height: 44px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; color: var(--text); background: var(--background); }
+.arrival-panel select:disabled { color: var(--muted); }
+.arrival-value { min-height: 23px; color: var(--primary-strong); font-size: 16px; font-weight: 800; }
+.arrival-panel small { color: var(--muted); font-size: 11px; line-height: 1.4; }
 .source-note { margin: 12px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .attribution-note { position: absolute; z-index: 10; right: 72px; bottom: max(24px, calc(env(safe-area-inset-bottom) + 8px)); padding: 5px 8px; border-radius: 6px; color: #334155; background: rgba(255,255,255,.88); font-size: 10px; }
 
@@ -131,6 +146,7 @@ button { touch-action: manipulation; }
   .icon-button:hover, .map-action:hover, .sheet-close:hover { border-color: #b8c7dc; background: var(--surface-muted); }
   .filter-status button:hover { background: #dbeafe; }
   .route-stops-panel button:hover { border-color: #93c5fd; background: #dbeafe; }
+  .favorite-routes button:hover, .route-actions button:hover { border-color: #93c5fd; background: #dbeafe; }
 }
 
 @media (max-width: 640px) {

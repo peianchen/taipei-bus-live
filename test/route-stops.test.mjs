@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildRouteStopIndex, routeStops } from '../src/route-stops.mjs';
+import { buildPathDetailIndex, buildRouteStopIndex, routeStops } from '../src/route-stops.mjs';
 
 test('站牌依主路線、方向與站序建立精簡索引', () => {
   const index = buildRouteStopIndex([
@@ -42,4 +42,19 @@ test('支線與主線線形相同時保留完整官方站牌', () => {
   ]);
   const shape = [[121.5, 25], [121.501, 25]];
   assert.equal(routeStops(index, 101, 0, { subRouteId: '1010', shape, mainShape: shape }).length, 2);
+});
+
+test('支線優先採官方站序，不混入線形附近的其他站牌', () => {
+  const index = buildRouteStopIndex([
+    { Id: 1, routeId: 101, goBack: 0, seqNo: 1, nameZh: '支線第二站', longitude: 121.5005, latitude: 25.0002 },
+    { Id: 2, routeId: 101, goBack: 0, seqNo: 2, nameZh: '鄰近主線站', longitude: 121.5006, latitude: 25.0002 },
+    { Id: 3, routeId: 101, goBack: 0, seqNo: 3, nameZh: '支線第一站', longitude: 121.5007, latitude: 25.0002 },
+  ]);
+  const pathIndex = buildPathDetailIndex([
+    { pathAttributeId: 1010, stopId: 1, sequenceNo: 2, type: '0' },
+    { pathAttributeId: 1010, stopId: 3, sequenceNo: 1, type: '0' },
+    { pathAttributeId: 1010, stopId: 2, sequenceNo: 3, type: '1' },
+  ]);
+  const shape = [[121.5, 25], [121.501, 25]];
+  assert.deepEqual(routeStops(index, 101, 0, { subRouteId: '1010', shape, pathIndex }).map(stop => stop.id), ['3', '1']);
 });
