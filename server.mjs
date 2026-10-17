@@ -1,11 +1,12 @@
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gzipSync } from 'node:zlib';
 import { normalizeBusSnapshot, readGzipJson, ROUTE_URL, SHAPE_URL, STOP_URL, VEHICLE_URL } from './src/bus-data.mjs';
+import { prepareJson, selectJsonPayload } from './src/json-response.mjs';
 import { applyRouteMotion, buildShapeIndex, createRouteMotionModel, routeTrackCoordinates } from './src/route-motion.mjs';
 import { buildRouteStopIndex, routeStops } from './src/route-stops.mjs';
+import { isVendorFile, resolveStaticFile } from './src/static-files.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 5180);
@@ -68,7 +69,7 @@ async function currentStopIndex() {
 }
 
 async function currentBuses() {
-  if (cache && Date.now() - cache.cachedAt < CACHE_MS) return cache.data;
+  if (cache && Date.now() - cache.cachedAt < CACHE_MS) return cache;
   if (inflight) return inflight;
   inflight = (async () => {
     const [vehicleResponse, routes, shapeIndex] = await Promise.all([
@@ -88,41 +89,49 @@ async function currentBuses() {
       })]));
       modeledSnapshotAt = data.snapshotAt;
     }
-    cache = { cachedAt: Date.now(), data };
-    return data;
+    const cachedAt = Date.now();
+    cache = {
+      cachedAt,
+      prepared: prepareJson({
+        ...data,
+        buses: applyRouteMotion(data.buses, motionModels, cachedAt),
+        checkedAt: new Date(cachedAt).toISOString(),
+      }),
+    };
+    return cache;
   })().finally(() => { inflight = null; });
   return inflight;
 }
 
-function sendJson(response, body, status = 200, acceptEncoding = '') {
-  const json = Buffer.from(JSON.stringify(body));
-  const compress = json.length >= 1_024 && /(?:^|,)\s*gzip(?:\s*;|\s*,|$)/i.test(acceptEncoding);
-  const payload = compress ? gzipSync(json, { level: 1 }) : json;
+function sendPreparedJson(response, prepared, status = 200, acceptEncoding = '') {
+  const { buffer, compressed } = selectJsonPayload(prepared, acceptEncoding);
   response.writeHead(status, {
     'content-type': MIME['.json'],
     'cache-control': 'no-store',
     'x-content-type-options': 'nosniff',
     'vary': 'accept-encoding',
-    ...(compress ? { 'content-encoding': 'gzip' } : {}),
+    ...(compressed ? { 'content-encoding': 'gzip' } : {}),
   });
-  response.end(payload);
+  response.end(buffer);
+}
+
+function sendJson(response, body, status = 200, acceptEncoding = '') {
+  sendPreparedJson(response, prepareJson(body), status, acceptEncoding);
 }
 
 async function staticFile(pathname, response) {
-  const aliases = {
-    '/vendor/maplibre-gl.mjs': 'node_modules/maplibre-gl/dist/maplibre-gl.mjs',
-    '/vendor/maplibre-gl-shared.mjs': 'node_modules/maplibre-gl/dist/maplibre-gl-shared.mjs',
-    '/vendor/maplibre-gl-worker.mjs': 'node_modules/maplibre-gl/dist/maplibre-gl-worker.mjs',
-    '/vendor/maplibre-gl.css': 'node_modules/maplibre-gl/dist/maplibre-gl.css',
-  };
-  const relative = aliases[pathname] || (pathname === '/' ? 'public/index.html' : `public${pathname}`);
-  const target = path.resolve(ROOT, relative);
-  if (!target.startsWith(ROOT + path.sep)) return false;
+  const target = resolveStaticFile(ROOT, pathname);
+  if (!target) return false;
   try {
-    const data = await readFile(target);
+    const actualTarget = await realpath(target);
+    if (!isVendorFile(pathname)) {
+      const publicRoot = await realpath(path.join(ROOT, 'public'));
+      if (!actualTarget.startsWith(publicRoot + path.sep)) return false;
+    }
+    const data = await readFile(actualTarget);
     response.writeHead(200, {
       'content-type': path.extname(target) === '.mjs' ? MIME['.js'] : MIME[path.extname(target)] || 'application/octet-stream',
-      'cache-control': aliases[pathname] ? 'public, max-age=86400' : 'no-cache',
+      'cache-control': isVendorFile(pathname) ? 'public, max-age=86400' : 'no-cache',
       'x-content-type-options': 'nosniff',
     });
     response.end(data);
@@ -138,13 +147,8 @@ const server = createServer(async (request, response) => {
       response.writeHead(405, { allow: 'GET, HEAD' }); response.end(); return;
     }
     if (url.pathname === '/api/buses') {
-      const data = await currentBuses();
-      const checkedAtMs = Date.now();
-      sendJson(response, {
-        ...data,
-        buses: applyRouteMotion(data.buses, motionModels, checkedAtMs),
-        checkedAt: new Date(checkedAtMs).toISOString(),
-      }, 200, request.headers['accept-encoding']);
+      const current = await currentBuses();
+      sendPreparedJson(response, current.prepared, 200, request.headers['accept-encoding']);
       return;
     }
     if (routeStopsMatch) {
@@ -155,6 +159,11 @@ const server = createServer(async (request, response) => {
       }
       const direction = Number(directionParam);
       const routeId = routeStopsMatch[1];
+      const subRouteId = url.searchParams.get('subRouteId');
+      if (subRouteId != null && !/^\d+$/.test(subRouteId)) {
+        sendJson(response, { error: 'subRouteId 必須是數字。' }, 400, request.headers['accept-encoding']);
+        return;
+      }
       const [stopIndex, shapeIndex] = await Promise.all([currentStopIndex(), currentShapeIndex()]);
       const stops = routeStops(stopIndex, routeId, direction);
       sendJson(response, {
@@ -162,7 +171,7 @@ const server = createServer(async (request, response) => {
         routeId,
         direction,
         stops,
-        shape: routeTrackCoordinates(shapeIndex, routeId, direction),
+        shape: routeTrackCoordinates(shapeIndex, routeId, direction, subRouteId),
       }, stops.length ? 200 : 404, request.headers['accept-encoding']);
       return;
     }

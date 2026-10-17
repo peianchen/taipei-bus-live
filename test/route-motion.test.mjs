@@ -24,6 +24,19 @@ test('可從輕量索引輸出指定方向的地圖線形', () => {
   assert.deepEqual(routeTrackCoordinates(shapeIndex, 10, 1), []);
 });
 
+test('顯示藍線時使用與支線車輛定位一致的軌跡', () => {
+  const shapes = buildShapeIndex([
+    { RouteID: 10, SubRouteID: -1, GoBack: 0, wkt: 'LINESTRING (121.5 25, 121.501 25)' },
+    { RouteID: 10, SubRouteID: 100, GoBack: 0, wkt: 'LINESTRING (121.51 25, 121.511 25)' },
+  ]);
+  const vehicle = { ...bus, routeId: '100', shapeRouteId: '10', lon: 121.5105 };
+  const model = createRouteMotionModel(vehicle, shapes);
+  assert.equal(model.track.key, 'sub:100:0');
+  assert.deepEqual(routeTrackCoordinates(shapes, 10, 0, 100), [
+    [121.51, 25], [121.511, 25],
+  ]);
+});
+
 test('GPS 先吸附路線，再沿折線而非直線前進', () => {
   const model = createRouteMotionModel(bus, shapeIndex);
   const point = predictOnRoute(model, Date.parse('2026-09-28T14:00:15.000Z'));

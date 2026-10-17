@@ -115,5 +115,9 @@ export function stabilizeRouteTarget(previous, next) {
     lat: previous.lat,
     bearing: previous.bearing,
     routeProgress: previous.routeProgress,
+    ...(next.motionMode === 'route' ? {
+      motionPath: [[previous.lon, previous.lat], [previous.lon, previous.lat]],
+      motionSpeedKph: 0,
+    } : {}),
   };
 }

@@ -50,8 +50,8 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
         type: 'Feature', id: bus.id,
         geometry: { type: 'Point', coordinates: previous.get(bus.id) || [bus.lon, bus.lat] },
         // MapLibre only needs these two fields. Keep the full vehicle record in
-        // state.busById so each 250ms setData call does not serialize operator,
-        // timestamps and motion diagnostics for every marker.
+        // state.busById so source updates do not serialize operator, timestamps
+        // and motion diagnostics for every marker.
         properties: { id: bus.id, route: bus.route },
       })),
     };
@@ -160,11 +160,15 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
 
   function prefersReducedMotion() { return matchMedia('(prefers-reduced-motion: reduce)').matches; }
 
+  function canAnimateVehicles() {
+    return !prefersReducedMotion() && map.getZoom() >= 13 && !map.isMoving?.();
+  }
+
   function animateVehicles() {
-    if (document.hidden || prefersReducedMotion() || map.getZoom() < 13 || map.isMoving?.() || !state.motionGeojson.features.length) return;
+    if (document.hidden || !canAnimateVehicles() || !state.motionGeojson.features.length) return;
     const nowMs = Date.now();
     const bounds = map.getBounds?.();
-    let changed = false;
+    const updates = [];
     for (const feature of state.motionGeojson.features) {
       const bus = state.busById.get(feature.properties.id);
       if (!bus) continue;
@@ -175,10 +179,18 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
       const next = advanceDisplayedCoordinate(feature.geometry.coordinates, bus, nowMs, {
         maximumStepMeters: maximumMetersPerSecond * MOTION_MS / 1000,
       });
-      if (next[0] !== feature.geometry.coordinates[0] || next[1] !== feature.geometry.coordinates[1]) changed = true;
+      if (next[0] !== feature.geometry.coordinates[0] || next[1] !== feature.geometry.coordinates[1]) {
+        updates.push({ id: feature.id, newGeometry: { type: 'Point', coordinates: next } });
+      }
       feature.geometry.coordinates = next;
     }
-    if (changed) map.getSource('buses')?.setData(state.motionGeojson);
+    if (!updates.length) return;
+    const source = map.getSource('buses');
+    if (typeof source?.updateData === 'function') {
+      source.updateData({ update: updates }).catch(() => source.setData(state.motionGeojson));
+    } else {
+      source?.setData(state.motionGeojson);
+    }
   }
   function timeText(value) {
     const date = new Date(value);
@@ -232,7 +244,7 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
         state.snapshotAt = body.snapshotAt;
         installLayers();
         updateSummary();
-        applyFilter({ preservePositions: true });
+        applyFilter({ preservePositions: canAnimateVehicles() });
       }
       updateSelectedBus();
     } catch (error) {
@@ -313,11 +325,12 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
     const routeId = String(bus?.shapeRouteId || '');
     const effectiveDirection = bus?.motionDirection ?? bus?.direction;
     const direction = effectiveDirection === 0 || effectiveDirection === 1 ? effectiveDirection : null;
+    const subRouteId = bus?.routeKey === `sub:${bus.routeId}:${direction}` ? String(bus.routeId) : null;
     if (!routeId || direction == null) {
       clearRouteStops('此車目前無法判斷路線方向');
       return;
     }
-    const key = `${routeId}:${direction}`;
+    const key = `${routeId}:${direction}:${subRouteId || ''}`;
     state.routeGeojson = EMPTY;
     map.getSource('selected-route')?.setData(EMPTY);
     elements.routeStopsPanel.setAttribute?.('aria-busy', 'true');
@@ -326,7 +339,8 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
     try {
       let body = state.routeCache.get(key);
       if (!body) {
-        const response = await fetch(`/api/routes/${encodeURIComponent(routeId)}/stops?direction=${direction}`, { cache: 'force-cache' });
+        const subRouteQuery = subRouteId ? `&subRouteId=${encodeURIComponent(subRouteId)}` : '';
+        const response = await fetch(`/api/routes/${encodeURIComponent(routeId)}/stops?direction=${direction}${subRouteQuery}`, { cache: 'force-cache' });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         body = await response.json();
         if (body.schemaVersion !== 1 || !Array.isArray(body.stops)) throw new Error('資料格式錯誤');

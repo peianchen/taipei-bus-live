@@ -53,8 +53,9 @@ export function buildShapeIndex(rows = []) {
   return index;
 }
 
-export function routeTrackCoordinates(shapeIndex, routeId, direction) {
-  const track = shapeIndex.get(`main:${routeId}:${Number(direction)}`);
+export function routeTrackCoordinates(shapeIndex, routeId, direction, subRouteId = null) {
+  const track = (subRouteId == null ? null : shapeIndex.get(`sub:${subRouteId}:${Number(direction)}`)) ||
+    shapeIndex.get(`main:${routeId}:${Number(direction)}`);
   if (!track) return [];
   return Array.from(track.longitude, (lon, index) => [lon, track.latitude[index]]);
 }

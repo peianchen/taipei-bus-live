@@ -92,3 +92,18 @@ test('路線動畫不受上一幀誤差影響，長時間更新不累積漂移',
   const expected = predictBusCoordinate(routeBus, atCorner);
   assert.deepEqual(displayed, expected);
 });
+
+test('防回溯也會阻止新動畫路徑把車點拉回舊位置', () => {
+  const previous = {
+    lon: 121.501, lat: 25, routeKey: 'main:10:0', routeProgress: 500, routeLength: 2_000,
+  };
+  const next = {
+    ...previous, lon: 121.499, routeProgress: 430, motionMode: 'route',
+    estimatedAt: '2026-09-28T14:00:00.000Z',
+    motionPathUntil: '2026-09-28T14:00:02.000Z',
+    motionPath: [[121.499, 25], [121.4991, 25]],
+  };
+  const stabilized = stabilizeRouteTarget(previous, next);
+  const displayed = predictBusCoordinate(stabilized, Date.parse('2026-09-28T14:00:01.000Z'));
+  assert.deepEqual(displayed, [previous.lon, previous.lat]);
+});

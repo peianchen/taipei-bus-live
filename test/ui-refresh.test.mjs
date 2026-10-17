@@ -26,7 +26,7 @@ function snapshot(snapshotAt, updatedAt = snapshotAt) {
   };
 }
 
-async function harness(fetches) {
+async function harness(fetches, { zoom = 14, reducedMotion = true } = {}) {
   const requests = [];
   const elements = new Map();
   const element = id => {
@@ -49,7 +49,10 @@ async function harness(fetches) {
     addSource(id, config) {
       this.sources.set(id, {
         data: config?.data || null,
-        setData(data) { this.data = data; },
+        setDataCalls: 0,
+        updateDataCalls: [],
+        setData(data) { this.data = data; this.setDataCalls += 1; },
+        updateData(diff) { this.updateDataCalls.push(diff); return Promise.resolve(); },
         getClusterExpansionZoom: async () => 12,
       });
     }
@@ -58,7 +61,7 @@ async function harness(fetches) {
     getLayer(id) { return this.layers.get(id); }
     setFilter(id, filter) { if (this.layers.has(id)) this.layers.get(id).filter = filter; }
     getCanvas() { return { style: {} }; }
-    getZoom() { return 14; }
+    getZoom() { return zoom; }
     fitBounds() {}
     easeTo() {}
   }
@@ -92,7 +95,7 @@ async function harness(fetches) {
       NavigationControl: class {},
       LngLatBounds: class { extend() { return this; } },
     },
-    matchMedia: () => ({ matches: true }),
+    matchMedia: () => ({ matches: reducedMotion }),
     predictBusCoordinate,
     advanceDisplayedCoordinate,
     followCoordinate,
@@ -108,7 +111,11 @@ async function harness(fetches) {
   vm.runInContext(source, context, { filename: 'public/app.js' });
   fakeMap.handlers.get('load')();
   await flush(); await flush();
-  return { element, map: fakeMap, requests, tick: () => intervals.get(1_000)() };
+  return {
+    element, map: fakeMap, requests,
+    tick: () => intervals.get(1_000)(),
+    animateTick: () => intervals.get(250)(),
+  };
 }
 
 test('背景的一秒輪詢不顯示手動更新旋轉狀態', async () => {
@@ -216,4 +223,39 @@ test('官方方向碼校正後，站牌與藍線使用實際匹配方向', async
   await flush(); await flush();
   assert.ok(app.requests.includes('/api/routes/307/stops?direction=1'));
   assert.equal(app.element('routeStopsStatus').textContent, '已顯示 2 站 · 回程');
+});
+
+test('總覽縮放停止動畫時，新快照仍更新既有車輛座標', async () => {
+  const first = snapshot('2026-09-28T14:00:00.000Z');
+  const second = snapshot('2026-09-28T14:00:05.000Z');
+  second.buses[0].lon = 121.55;
+  const app = await harness([response(first), response(second)], { zoom: 11.1, reducedMotion: false });
+  app.tick();
+  await flush(); await flush();
+  assert.equal(app.map.getSource('buses').data.features[0].geometry.coordinates[0], 121.55);
+});
+
+test('支線車輛載入站牌時要求與定位相同的支線線形', async () => {
+  const body = snapshot('2026-09-28T14:00:00.000Z');
+  body.buses[0].routeId = '30701';
+  body.buses[0].routeKey = 'sub:30701:0';
+  const app = await harness([response(body)]);
+  app.map.handlers.get('click:bus-points')({ features: [{ properties: { id: 'BUS-1' } }] });
+  await flush(); await flush();
+  assert.ok(app.requests.includes('/api/routes/307/stops?direction=0&subRouteId=30701'));
+});
+
+test('動畫只更新移動的車點，不重送整份 GeoJSON', async () => {
+  const body = snapshot('2026-09-28T14:00:00.000Z');
+  body.buses[0].motionMode = 'route';
+  body.buses[0].estimatedAt = '2026-09-28T14:00:00.000Z';
+  body.buses[0].motionPathUntil = '2026-09-28T14:00:02.000Z';
+  body.buses[0].motionPath = [[121.54, 25.04], [121.541, 25.04]];
+  const app = await harness([response(body)], { zoom: 14, reducedMotion: false });
+  const source = app.map.getSource('buses');
+  const before = source.setDataCalls;
+  app.animateTick();
+  assert.equal(source.setDataCalls, before);
+  assert.equal(source.updateDataCalls.length, 1);
+  assert.equal(source.updateDataCalls[0].update[0].id, 'BUS-1');
 });
