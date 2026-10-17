@@ -8,6 +8,15 @@ export function prepareJson(body) {
   };
 }
 
+export function prepareStaleSnapshot(previous, checkedAtMs) {
+  const body = JSON.parse(previous.plain.toString('utf8'));
+  return prepareJson({
+    ...body,
+    checkedAt: new Date(checkedAtMs).toISOString(),
+    upstreamStale: true,
+  });
+}
+
 export function selectJsonPayload(prepared, acceptEncoding = '') {
   const useGzip = prepared.gzip && /(?:^|,)\s*gzip(?:\s*;|\s*,|$)/i.test(acceptEncoding);
   return { buffer: useGzip ? prepared.gzip : prepared.plain, compressed: Boolean(useGzip) };

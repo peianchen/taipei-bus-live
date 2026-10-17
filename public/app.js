@@ -13,7 +13,7 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
   const state = {
     buses: [], busById: new Map(), motionGeojson: EMPTY, query: '', refreshTimer: null,
     motionTimer: null, loading: false, selected: null, snapshotAt: null, checkedAt: null,
-    routeGeojson: EMPTY, routeCache: new Map(), routeLoadToken: 0,
+    routeGeojson: EMPTY, routeCache: new Map(), routeLoadToken: 0, selectedRouteKey: '',
   };
 
   const elements = {
@@ -209,10 +209,11 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
     const ageSec = Number.isFinite(snapshotMs) && Number.isFinite(checkedMs)
       ? Math.max(0, Math.floor((checkedMs - snapshotMs) / 1000))
       : 0;
-    const delayed = ageSec > 30;
-    elements.status.textContent = delayed
-      ? `資料延遲 · 保留 ${state.buses.length.toLocaleString('zh-TW')} 輛車況`
-      : `已連線 · ${state.buses.length.toLocaleString('zh-TW')} 輛營運中`;
+    const delayed = body.upstreamStale === true || ageSec > 30;
+    const count = state.buses.length.toLocaleString('zh-TW');
+    if (body.upstreamStale === true) elements.status.textContent = `上游暫時無法更新 · 保留 ${count} 輛車況`;
+    else if (delayed) elements.status.textContent = `資料延遲 · 保留 ${count} 輛車況`;
+    else elements.status.textContent = `已連線 · ${count} 輛營運中`;
     elements.live.dataset.state = delayed ? 'stale' : 'online';
   }
 
@@ -320,6 +321,14 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
     elements.fitRoute.hidden = body.stops.length === 0;
   }
 
+  function routeSelectionKey(bus) {
+    const routeId = String(bus?.shapeRouteId || '');
+    const direction = bus?.motionDirection ?? bus?.direction;
+    if (!routeId || (direction !== 0 && direction !== 1)) return '';
+    const subRouteId = bus?.routeKey === `sub:${bus.routeId}:${direction}` ? String(bus.routeId) : '';
+    return `${routeId}:${direction}:${subRouteId}`;
+  }
+
   async function loadRouteStops(bus) {
     const token = ++state.routeLoadToken;
     const routeId = String(bus?.shapeRouteId || '');
@@ -357,6 +366,7 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
   function showBus(bus) {
     if (!bus) return;
     state.selected = bus.id;
+    state.selectedRouteKey = routeSelectionKey(bus);
     updateSelectedLayer();
     renderBus(bus);
     const wasHidden = elements.sheet.hidden;
@@ -369,6 +379,7 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
   function closeSheet() {
     elements.sheet.hidden = true;
     state.selected = null;
+    state.selectedRouteKey = '';
     elements.app.dataset.sheetOpen = 'false';
     updateSelectedLayer();
     clearRouteStops();
@@ -378,7 +389,14 @@ import { describeBusMotion, formatRelativeAge } from '/presentation.mjs';
   function updateSelectedBus() {
     if (!state.selected) return;
     const bus = state.buses.find(item => item.id === state.selected);
-    if (bus) renderBus(bus);
+    if (bus) {
+      renderBus(bus);
+      const key = routeSelectionKey(bus);
+      if (key !== state.selectedRouteKey) {
+        state.selectedRouteKey = key;
+        loadRouteStops(bus);
+      }
+    }
     else closeSheet();
   }
 

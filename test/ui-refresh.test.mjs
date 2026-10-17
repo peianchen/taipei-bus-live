@@ -225,6 +225,27 @@ test('官方方向碼校正後，站牌與藍線使用實際匹配方向', async
   assert.equal(app.element('routeStopsStatus').textContent, '已顯示 2 站 · 回程');
 });
 
+test('已選車輛方向改變時，站牌與藍線改載新方向', async () => {
+  const first = snapshot('2026-09-28T14:00:00.000Z');
+  const second = snapshot('2026-09-28T14:00:05.000Z');
+  second.buses[0].direction = 1;
+  const app = await harness([response(first), response(second)]);
+  app.map.handlers.get('click:bus-points')({ features: [{ properties: { id: 'BUS-1' } }] });
+  await flush(); await flush();
+  app.tick();
+  await flush(); await flush();
+  assert.ok(app.requests.includes('/api/routes/307/stops?direction=1'));
+  assert.equal(app.element('routeStopsStatus').textContent, '已顯示 2 站 · 回程');
+});
+
+test('上游故障而保留舊車況時，介面不能顯示已連線', async () => {
+  const body = snapshot('2026-09-28T14:00:00.000Z', '2026-09-28T14:00:01.000Z');
+  body.upstreamStale = true;
+  const app = await harness([response(body)]);
+  assert.equal(app.element('liveStatus').dataset.state, 'stale');
+  assert.match(app.element('statusText').textContent, /資料延遲|暫時無法更新/);
+});
+
 test('總覽縮放停止動畫時，新快照仍更新既有車輛座標', async () => {
   const first = snapshot('2026-09-28T14:00:00.000Z');
   const second = snapshot('2026-09-28T14:00:05.000Z');

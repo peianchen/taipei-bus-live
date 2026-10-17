@@ -2,7 +2,7 @@
 
 > **Beta／開發中：** 車輛位置包含依官方回報資料所做的短時間推估，不能作為等車或行車安全的唯一依據。
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/chen861019/taipei-bus-live)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/peianchen/taipei-bus-live)
 
 獨立、輕量的台北公車即時地圖。這是重新撰寫的專案，只參考即時交通地圖的互動概念，
 不包含台鐵、高鐵、捷運班表、3D 模型、音樂或軌島的程式碼與品牌資產。
@@ -17,12 +17,13 @@
 - 官方方向碼暫時異常時，只在反方向軌跡 40 公尺內才安全校正；離群 GPS 則保留上一個可信模型
 - 地圖匹配同時參考上一段沿線進度，並依匹配信心自動縮短低信心外插時間
 - 依路線或車牌搜尋
-- 點選公車後按需載入該行駛方向的官方路線線形與站牌；支線車輛優先顯示與定位相同的支線線形
+- 點選公車後按需載入該行駛方向的官方路線線形與站牌；支線只顯示貼近該支線的站牌，車輛換方向時也會更新
 - 車輛卡顯示方向、車牌、官方速度、業者、回報年齡與位置推估狀態
 - 每 1 秒檢查即時資料；伺服器端共用 1 秒車況與已壓縮的回應
 - 官方快照沒有變化時不重建地圖標記，降低每秒輪詢的記憶體負擔
 - 動畫只計算可視範圍內車輛，並只傳送變動車點給地圖；總覽與減少動態效果模式仍隨新快照更新位置
 - 路線名稱與軌跡索引快取 6 小時，只讓高頻變動的車輛位置定期更新
+- 上游請求設有逾時；暫時失敗時保留上一份車況並明確標記資料延遲
 - 站牌索引只在首次選取路線時由伺服器載入，瀏覽器只接收所選路線方向，避免一次繪製全市站牌
 - 手機版底部資訊卡、鍵盤操作、清楚焦點與 reduced-motion 支援
 
@@ -38,7 +39,8 @@ npm start
 ## 部署到 Render
 
 點選上方 **Deploy to Render**，即可使用 `render.yaml` 建立免費的 Render Web Service。部署完成後會取得公開的
-`onrender.com` HTTPS 網址；後續推送到 GitHub 的 `main` 分支時會自動重新部署。
+`onrender.com` HTTPS 網址；若 Render 服務已連接本儲存庫並啟用 Auto-Deploy，後續推送到 GitHub 的 `main` 分支會自動重新部署。
+若公開網站仍顯示舊版，請在 Render 服務頁面選 **Manual Deploy → Deploy latest commit**，並檢查服務連接的是本儲存庫。
 
 免費服務閒置一段時間後會休眠，第一次開啟可能需要等待服務喚醒。
 

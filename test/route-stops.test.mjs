@@ -24,3 +24,22 @@ test('無效座標與缺少站名的資料不進入索引', () => {
   ]);
   assert.deepEqual(routeStops(index, 101, 0), []);
 });
+
+test('支線只顯示接近該支線線形的官方站牌，不混入主線分岔站', () => {
+  const index = buildRouteStopIndex([
+    { Id: 1, routeId: 101, goBack: 0, seqNo: 1, nameZh: '支線站', longitude: 121.5005, latitude: 25.0002 },
+    { Id: 2, routeId: 101, goBack: 0, seqNo: 2, nameZh: '主線分岔站', longitude: 121.5005, latitude: 25.01 },
+  ]);
+  const shape = [[121.5, 25], [121.501, 25]];
+  assert.deepEqual(routeStops(index, 101, 0, { subRouteId: '1010', shape }).map(stop => stop.name), ['支線站']);
+  assert.equal(routeStops(index, 101, 0).length, 2);
+});
+
+test('支線與主線線形相同時保留完整官方站牌', () => {
+  const index = buildRouteStopIndex([
+    { Id: 1, routeId: 101, goBack: 0, seqNo: 1, nameZh: '路線站', longitude: 121.5005, latitude: 25.0002 },
+    { Id: 2, routeId: 101, goBack: 0, seqNo: 2, nameZh: '偏離線形的官方站', longitude: 121.5005, latitude: 25.002 },
+  ]);
+  const shape = [[121.5, 25], [121.501, 25]];
+  assert.equal(routeStops(index, 101, 0, { subRouteId: '1010', shape, mainShape: shape }).length, 2);
+});

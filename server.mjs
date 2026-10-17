@@ -3,10 +3,11 @@ import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { normalizeBusSnapshot, readGzipJson, ROUTE_URL, SHAPE_URL, STOP_URL, VEHICLE_URL } from './src/bus-data.mjs';
-import { prepareJson, selectJsonPayload } from './src/json-response.mjs';
+import { prepareJson, prepareStaleSnapshot, selectJsonPayload } from './src/json-response.mjs';
 import { applyRouteMotion, buildShapeIndex, createRouteMotionModel, routeTrackCoordinates } from './src/route-motion.mjs';
 import { buildRouteStopIndex, routeStops } from './src/route-stops.mjs';
 import { isVendorFile, resolveStaticFile } from './src/static-files.mjs';
+import { fetchUpstream } from './src/upstream.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 5180);
@@ -34,7 +35,7 @@ async function currentRoutes() {
   if (routeCache && Date.now() - routeCache.cachedAt < ROUTE_CACHE_MS) return routeCache.data;
   if (routeInflight) return routeInflight;
   routeInflight = (async () => {
-    const response = await fetch(ROUTE_URL, { headers: { accept: 'application/gzip, application/json' } });
+    const response = await fetchUpstream(ROUTE_URL);
     const data = await readGzipJson(response);
     routeCache = { cachedAt: Date.now(), data };
     return data;
@@ -46,7 +47,7 @@ async function currentShapeIndex() {
   if (shapeCache && Date.now() - shapeCache.cachedAt < ROUTE_CACHE_MS) return shapeCache.data;
   if (shapeInflight) return shapeInflight;
   shapeInflight = (async () => {
-    const response = await fetch(SHAPE_URL, { headers: { accept: 'application/gzip, application/json' } });
+    const response = await fetchUpstream(SHAPE_URL);
     const rows = await readGzipJson(response);
     const data = buildShapeIndex(rows);
     shapeCache = { cachedAt: Date.now(), data };
@@ -59,7 +60,7 @@ async function currentStopIndex() {
   if (stopCache && Date.now() - stopCache.cachedAt < ROUTE_CACHE_MS) return stopCache.data;
   if (stopInflight) return stopInflight;
   stopInflight = (async () => {
-    const response = await fetch(STOP_URL, { headers: { accept: 'application/gzip, application/json' } });
+    const response = await fetchUpstream(STOP_URL);
     const body = await readGzipJson(response);
     const data = buildRouteStopIndex(body?.BusInfo);
     stopCache = { cachedAt: Date.now(), data };
@@ -72,33 +73,41 @@ async function currentBuses() {
   if (cache && Date.now() - cache.cachedAt < CACHE_MS) return cache;
   if (inflight) return inflight;
   inflight = (async () => {
-    const [vehicleResponse, routes, shapeIndex] = await Promise.all([
-      fetch(VEHICLE_URL, { cache: 'no-store', headers: { accept: 'application/gzip, application/json' } }),
-      currentRoutes(),
-      currentShapeIndex().catch(error => {
-        console.warn('路線軌跡暫時無法取得，改用方位推估：', error.message);
-        return null;
-      }),
-    ]);
-    const vehicles = await readGzipJson(vehicleResponse);
-    const data = normalizeBusSnapshot(vehicles, routes);
-    if (shapeIndex && data.snapshotAt !== modeledSnapshotAt) {
-      const previousModels = motionModels;
-      motionModels = new Map(data.buses.map(bus => [bus.id, createRouteMotionModel(bus, shapeIndex, {
-        previousModel: previousModels.get(bus.id),
-      })]));
-      modeledSnapshotAt = data.snapshotAt;
+    try {
+      const [vehicleResponse, routes, shapeIndex] = await Promise.all([
+        fetchUpstream(VEHICLE_URL),
+        currentRoutes(),
+        currentShapeIndex().catch(error => {
+          console.warn('路線軌跡暫時無法取得，改用方位推估：', error.message);
+          return null;
+        }),
+      ]);
+      const vehicles = await readGzipJson(vehicleResponse);
+      const data = normalizeBusSnapshot(vehicles, routes);
+      if (shapeIndex && data.snapshotAt !== modeledSnapshotAt) {
+        const previousModels = motionModels;
+        motionModels = new Map(data.buses.map(bus => [bus.id, createRouteMotionModel(bus, shapeIndex, {
+          previousModel: previousModels.get(bus.id),
+        })]));
+        modeledSnapshotAt = data.snapshotAt;
+      }
+      const cachedAt = Date.now();
+      cache = {
+        cachedAt,
+        prepared: prepareJson({
+          ...data,
+          buses: applyRouteMotion(data.buses, motionModels, cachedAt),
+          checkedAt: new Date(cachedAt).toISOString(),
+        }),
+      };
+      return cache;
+    } catch (error) {
+      if (!cache) throw error;
+      console.warn('上游車況暫時無法更新，保留上一份車況：', error.message);
+      const cachedAt = Date.now();
+      cache = { cachedAt, prepared: prepareStaleSnapshot(cache.prepared, cachedAt) };
+      return cache;
     }
-    const cachedAt = Date.now();
-    cache = {
-      cachedAt,
-      prepared: prepareJson({
-        ...data,
-        buses: applyRouteMotion(data.buses, motionModels, cachedAt),
-        checkedAt: new Date(cachedAt).toISOString(),
-      }),
-    };
-    return cache;
   })().finally(() => { inflight = null; });
   return inflight;
 }
@@ -165,14 +174,16 @@ const server = createServer(async (request, response) => {
         return;
       }
       const [stopIndex, shapeIndex] = await Promise.all([currentStopIndex(), currentShapeIndex()]);
-      const stops = routeStops(stopIndex, routeId, direction);
+      const shape = routeTrackCoordinates(shapeIndex, routeId, direction, subRouteId);
+      const mainShape = subRouteId == null ? [] : routeTrackCoordinates(shapeIndex, routeId, direction);
+      const stops = routeStops(stopIndex, routeId, direction, { subRouteId, shape, mainShape });
       sendJson(response, {
         schemaVersion: 1,
         routeId,
         direction,
         stops,
-        shape: routeTrackCoordinates(shapeIndex, routeId, direction, subRouteId),
-      }, stops.length ? 200 : 404, request.headers['accept-encoding']);
+        shape,
+      }, stops.length || shape.length ? 200 : 404, request.headers['accept-encoding']);
       return;
     }
     if (url.pathname === '/api/health') {

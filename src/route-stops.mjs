@@ -5,6 +5,23 @@ const finite = value => {
 };
 
 const keyFor = (routeId, direction) => `${routeId}:${direction}`;
+const MAX_SUBROUTE_STOP_DISTANCE_METERS = 150;
+
+function distanceToShapeMeters(stop, shape) {
+  const longitudeMeters = 111_320 * Math.cos(stop.lat * Math.PI / 180);
+  let nearest = Infinity;
+  for (let index = 1; index < shape.length; index += 1) {
+    const first = shape[index - 1];
+    const second = shape[index];
+    const x = (first[0] - stop.lon) * longitudeMeters;
+    const y = (first[1] - stop.lat) * 111_320;
+    const dx = (second[0] - first[0]) * longitudeMeters;
+    const dy = (second[1] - first[1]) * 111_320;
+    const fraction = Math.max(0, Math.min(1, -(x * dx + y * dy) / (dx * dx + dy * dy || 1)));
+    nearest = Math.min(nearest, Math.hypot(x + fraction * dx, y + fraction * dy));
+  }
+  return nearest;
+}
 
 export function buildRouteStopIndex(rows = []) {
   const index = new Map();
@@ -33,6 +50,12 @@ export function buildRouteStopIndex(rows = []) {
   return index;
 }
 
-export function routeStops(index, routeId, direction) {
-  return index.get(keyFor(String(routeId), Number(direction))) || [];
+export function routeStops(index, routeId, direction, { subRouteId = null, shape = [], mainShape = [] } = {}) {
+  const stops = index.get(keyFor(String(routeId), Number(direction))) || [];
+  if (subRouteId == null || shape.length < 2) return stops;
+  if (mainShape.length === shape.length && mainShape.every((point, index) =>
+    point[0] === shape[index][0] && point[1] === shape[index][1])) return stops;
+  // GetStop groups stops by the parent route, not by SubRouteID. Keep only
+  // stops near the selected branch, so branch-only buses do not show detours.
+  return stops.filter(stop => distanceToShapeMeters(stop, shape) <= MAX_SUBROUTE_STOP_DISTANCE_METERS);
 }
